@@ -1,82 +1,79 @@
+import os
+import json
 import asyncio
 import websockets
-import json
 import requests
-from flask import Flask, request, jsonify
+from flask import Flask, request, send_file, jsonify
 from threading import Thread
+from gtts import gTTS  # Google Text-to-Speech
 
-# Replace with your Deepgram API Key
+# Replace with your real keys
 DEEPGRAM_KEY = "606fec08de35194cc8ac18e7517ce0bc2e2283c1"
-DG_URL = "wss://api.deepgram.com/v1/listen?encoding=linear16&sample_rate=16000"
+GEMINI_API_KEY = "AIzaSyACZZTQxREALZ2idltCKXzFI9JUG8_aWp8"
+DG_WS_URL = "wss://api.deepgram.com/v1/listen?encoding=linear16&sample_rate=16000"
 
 app = Flask(__name__)
 
-@app.route('/upload-audio', methods=['POST'])
-def upload_audio():
-    raw_audio = request.data  # Get the raw audio data from the request
-    transcription = asyncio.run(send_to_deepgram(raw_audio))  # Get transcription
-    return jsonify({"transcription": transcription})  # Return transcription as JSON
+# Accepts audio from ESP32 and returns audio response
+@app.route("/esp32-audio", methods=["POST"])
+def handle_esp32_audio():
+    audio_data = request.data
 
-@app.route('/upload-audio-file', methods=['POST'])
-def upload_audio_file():
-    file = request.files['audio']  # Get the uploaded file from the form data
-    file_path = f"temp_audio.wav"  # Save the file temporarily
-    file.save(file_path)
-    transcription = transcribe_with_deepgram(file_path)  # Get transcription from file
-    return jsonify({"transcription": transcription})  # Return transcription as JSON
+    # Step 1: Transcribe via Deepgram WebSocket
+    transcription = asyncio.run(transcribe_audio(audio_data))
+    if not transcription:
+        return jsonify({"error": "Could not transcribe"}), 400
 
-# WebSocket real-time transcription
-async def send_to_deepgram(raw_audio):
+    print("Transcribed:", transcription)
+
+    # Step 2: Send to Gemini
+    gemini_reply = get_gemini_response(transcription)
+    print("Gemini:", gemini_reply)
+
+    # Step 3: Convert to TTS
+    tts_path = "response.mp3"
+    tts = gTTS(gemini_reply)
+    tts.save(tts_path)
+
+    # Step 4: Send back audio
+    return send_file(tts_path, mimetype="audio/mpeg")
+
+# WebSocket-based Deepgram transcription
+async def transcribe_audio(raw_audio):
     try:
         async with websockets.connect(
-            DG_URL,
+            DG_WS_URL,
             extra_headers={"Authorization": f"Token {DEEPGRAM_KEY}"}
         ) as ws:
             await ws.send(raw_audio)
             while True:
-                msg = await ws.recv()  # Wait for the response from Deepgram
-                print("📝 Transcript:", msg)  # Log the response
-                # Extract transcription from the WebSocket message
-                transcript = extract_transcription(msg)
-                if transcript:
-                    return transcript  # Return the transcription to the Flask app
+                msg = await ws.recv()
+                print("📝 Raw WS Msg:", msg)
+                data = json.loads(msg)
+                text = data.get("channel", {}).get("alternatives", [{}])[0].get("transcript", "")
+                if text:
+                    return text
     except Exception as e:
-        print(f"❌ Error: {e}")
-        return "Error in transcription."
-
-def extract_transcription(msg):
-    try:
-        # Extract the transcription from the WebSocket message
-        data = json.loads(msg)  # Assuming msg is JSON
-        transcript = data.get('channel', {}).get('alternatives', [{}])[0].get('transcript', '')
-        return transcript
-    except Exception as e:
-        print(f"❌ Error extracting transcription: {e}")
+        print("❌ Deepgram error:", e)
         return None
 
-# File-based transcription (HTTP POST method)
-def transcribe_with_deepgram(wav_path):
+# Gemini API call
+def get_gemini_response(prompt):
+    url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent"
+    headers = {"Content-Type": "application/json"}
+    params = {"key": GEMINI_API_KEY}
+    data = {
+        "contents": [{"parts": [{"text": prompt}]}]
+    }
     try:
-        with open(wav_path, 'rb') as audio:
-            response = requests.post(
-                "https://api.deepgram.com/v1/listen",
-                headers={
-                    "Authorization": f"Token {DEEPGRAM_KEY}",
-                    "Content-Type": "audio/wav"
-                },
-                data=audio
-            )
-        if response.status_code == 200:
-            # Extract the transcription from the JSON response
-            return response.json()['results']['channels'][0]['alternatives'][0]['transcript']
-        else:
-            raise Exception(f"Deepgram Error {response.status_code}: {response.text}")
+        res = requests.post(url, headers=headers, params=params, json=data)
+        res_json = res.json()
+        return res_json["candidates"][0]["content"]["parts"][0]["text"]
     except Exception as e:
-        return f"Transcription error: {e}"
+        return "Sorry, Gemini failed."
 
 def run_flask():
     app.run(host="0.0.0.0", port=5000)
 
-# Run the Flask server in a separate thread for hosting
+# Start Flask server
 Thread(target=run_flask).start()
-
