@@ -3,7 +3,7 @@ import websockets
 from flask import Flask, request, Response
 from threading import Thread
 
-DEEPGRAM_KEY = "your_deepgram_api_key"
+DEEPGRAM_KEY = "606fec08de35194cc8ac18e7517ce0bc2e2283c1"
 DG_URL = "wss://api.deepgram.com/v1/listen?encoding=linear16&sample_rate=16000"
 
 app = Flask(__name__)
